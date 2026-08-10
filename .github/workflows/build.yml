@@ -13,6 +13,9 @@ env:
 jobs:
   check-and-build:
     runs-on: ubuntu-latest
+    concurrency:
+      group: build-nextcloud-ocr
+      cancel-in-progress: false
     permissions:
       packages: write
       contents: write        # zum Committen der State-Datei
@@ -23,13 +26,21 @@ jobs:
       - name: Aktuellen Upstream-Zustand ermitteln
         id: state
         run: |
-          DIGEST=$(docker buildx imagetools inspect nextcloud:apache \
-            --format '{{println .Manifest.Digest}}' | head -n1)
+          set -euo pipefail
 
-          PKGS=$(docker run --rm nextcloud:apache bash -c \
+          # Single source of truth: das FROM im Dockerfile
+          BASE=$(grep -m1 -oP '^FROM \K\S+' Dockerfile)
+          echo "Basis-Image: $BASE"
+
+          DIGEST=$(docker buildx imagetools inspect "$BASE" \
+            --format '{{println .Manifest.Digest}}' | head -n1)
+          [ -n "$DIGEST" ] || { echo "Digest leer"; exit 1; }
+
+          PKGS=$(docker run --rm "$BASE" bash -c \
             'apt-get update -qq >/dev/null 2>&1 && \
              apt-cache policy ocrmypdf tesseract-ocr-deu tesseract-ocr-eng | \
              grep -E "^(ocrmypdf|tesseract)|Candidate"')
+          [ -n "$PKGS" ] || { echo "Paketabfrage leer"; exit 1; }
 
           HASH=$(printf '%s\n%s' "$DIGEST" "$PKGS" | sha256sum | cut -d' ' -f1)
           echo "hash=$HASH" >> "$GITHUB_OUTPUT"
@@ -67,7 +78,9 @@ jobs:
           context: .
           pull: true
           push: true
-          tags: ${{ env.IMAGE }}:latest
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:${{ github.run_number }}
 
       - name: Neuen Zustand committen
         if: steps.compare.outputs.changed == 'true'
