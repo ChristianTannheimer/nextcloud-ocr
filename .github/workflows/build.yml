@@ -1,10 +1,19 @@
 name: Build nextcloud-ocr
 
+# CVE-Scan (Grype):
+#   - nach jedem Build
+#   - zusätzlich jeden Montag, auch ohne Build (neue CVEs im alten Image)
+#   - bei jedem manuellen Start
+# Gemeldet wird nur CRITICAL/HIGH, für das es einen Fix gibt. Dann wird der
+# Scan-Job rot und GitHub schickt eine Mail. Das Image wird trotzdem
+# veröffentlicht - ein neueres Image ist fast immer besser als das alte.
+
 on:
   push:
     branches: [main]
   schedule:
     - cron: '30 3 * * *'   # täglich 03:30 UTC prüfen
+    - cron: '45 4 * * 1'   # montags 04:45 UTC: CVE-Scan auch ohne Build
   workflow_dispatch:
     inputs:
       force:
@@ -24,6 +33,8 @@ jobs:
     permissions:
       packages: write
       contents: write        # zum Committen der State-Datei
+    outputs:
+      changed: ${{ steps.compare.outputs.changed }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -107,3 +118,36 @@ jobs:
           git commit -m "build: $(date -u +%F) [skip ci]"
           git pull --rebase --autostash origin main
           git push origin HEAD:main
+
+  scan:
+    needs: check-and-build
+    # always(): läuft auch beim Montags-Scan ohne Build.
+    # Ist check-and-build fehlgeschlagen, kommt dafür schon eine eigene Mail.
+    if: >-
+      always() &&
+      needs.check-and-build.result == 'success' &&
+      (needs.check-and-build.outputs.changed == 'true' ||
+       github.event.schedule == '45 4 * * 1' ||
+       github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      # Grype liest die Zugangsdaten aus der Docker-Config,
+      # nötig falls das Package auf ghcr.io privat ist.
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: CVE-Scan (Grype)
+        # Auf Commit gepinnt (v7.4.2), nicht auf den Tag.
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: ${{ env.IMAGE }}:latest
+          severity-cutoff: high
+          only-fixed: true
+          fail-build: true
+          output-format: table
